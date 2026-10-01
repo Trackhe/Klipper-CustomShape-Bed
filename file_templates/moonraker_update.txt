@@ -1,0 +1,12 @@
+# Template — install.sh normally writes this with the real path/origin.
+# You can also paste a tailored version into moonraker.conf manually.
+
+[update_manager keepout_zone]
+type: git_repo
+path: ~/Klipper-CustomShape-Bed
+origin: https://github.com/Trackhe/Klipper-CustomShape-Bed.git
+primary_branch: main
+is_system_service: False
+managed_services: klipper
+info_tags:
+  desc=Klipper keepout zones (custom bed / AWD obstacles)

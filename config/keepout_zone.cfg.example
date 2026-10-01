@@ -1,0 +1,22 @@
+# Keepout zones — AWD motor mounts (front corners)
+# Include from printer.cfg:  [include keepout_zone.cfg]
+#
+# Coordinates are G-code / printer.cfg XY (nozzle frame).
+# Measure your mounts and add margin.
+
+[keepout_zone]
+enabled: True
+# Extra clearance around each zone (mm)
+margin: 2.0
+# Optional: only enforce when Z <= this (mm). Leave unset = all heights.
+# z_max: 30
+
+# Front left motor mount (~50x50)
+zone_1_name: front_left
+zone_1_min: 0, 0
+zone_1_max: 50, 50
+
+# Front right motor mount (~50x50)
+zone_2_name: front_right
+zone_2_min: 450, 0
+zone_2_max: 500, 50
