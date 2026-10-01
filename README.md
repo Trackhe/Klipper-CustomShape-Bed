@@ -93,7 +93,8 @@ zone_2_max: 500, 50
 |--------|-----------|
 | `margin` | Zusätzlicher Rand um jede Zone (mm) |
 | `z_max` | Wenn gesetzt: Keepout nur bei `Z ≤ z_max` (Kopf kann höher darüber) |
-| `zone_N_min` / `zone_N_max` | Rechteck-Ecken in **G-Code-XY** (wie `printer.cfg`) |
+| `check_toolhead_moves` | Auch Mesh/Probe/Beacon über `toolhead.move` prüfen (Default: True) |
+| `zone_N_min` / `zone_N_max` | Rechteck-Ecken in **Maschinen-/Düsen-XY** |
 | `zone_N_name` | Optionaler Name für Logs/Status |
 
 Bis zu 99 Zonen (`zone_1_…` … `zone_99_…`).
@@ -110,20 +111,28 @@ Bis zu 99 Zonen (`zone_1_…` … `zone_99_…`).
 
 ## Was geprüft wird — und was nicht
 
-**Geprüft:** normale G0/G1-Moves über die G-Code-Move-Transform (Druck, viele Macros, UI-Fahrten). **Ziel und Strecke** gegen jedes Keepout-Rechteck.
+**Geprüft (zwei Lagen):**
 
-**Nicht / nur bedingt:**
+1. **G-Code-Transform** — normale `G0`/`G1` (Druck, Macros, UI)  
+2. **`toolhead.move` / `toolhead.drip_move`** — damit auch **Bed Mesh, Probe, Beacon**, alles was über `manual_move` läuft  
+
+Ziel **und** Strecke gegen jedes Keepout-Rechteck. Ohne XY-Homing greift der Toolhead-Guard noch nicht (Position unzuverlässig).
+
+| Option | Default | Bedeutung |
+|--------|---------|-----------|
+| `check_toolhead_moves` | `True` | Mesh/Probe/Beacon mit absichern |
+
+**Weiterhin nicht abgedeckt:**
 
 | Pfad | Hinweis |
 |------|---------|
-| `FORCE_MOVE` / Low-Level-Stepper | umgeht G-Code-Transforms |
-| Homing / manches Probing | oft Toolhead-intern — Mesh/`safe_z_home` trotzdem so setzen, dass Ecken nicht angefahren werden |
-| `SET_GCODE_OFFSET` | Keepouts sind in G-Code-Koordinaten; große Offsets verschieben die Zuordnung |
+| `FORCE_MOVE` / reine Stepper-Moves | Low-Level, absichtlich |
+| `SET_GCODE_OFFSET` | G-Code-Lage vs. Toolhead-Lage kann abweichen — physische Halter = Toolhead-Koordinaten |
 
 Ergänzend empfohlen:
 
 - Orca: Bed 500×500 + **Excluded bed area** für beide Ecken  
-- `[bed_mesh]` `mesh_min`/`mesh_max` außerhalb der Keepouts (Probe-Offset beachten)  
+- `[bed_mesh]` `mesh_min`/`mesh_max` und ggf. `faulty_region_*` außerhalb der Halter  
 - `[safe_z_home]` in die Bettmitte  
 
 ---

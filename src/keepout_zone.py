@@ -13,7 +13,7 @@ def point_in_rect(x, y, xmin, ymin, xmax, ymax):
 
 
 def segment_intersects_rect(x0, y0, x1, y1, xmin, ymin, xmax, ymax):
-    """True if the open/closed segment from (x0,y0) to (x1,y1) hits the AABB.
+    """True if the segment from (x0,y0) to (x1,y1) hits the AABB.
 
     Uses Liang-Barsky clipping. Also returns True if either endpoint is inside.
     """
@@ -59,10 +59,17 @@ class KeepoutZone:
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode_move = self.printer.load_object(config, 'gcode_move')
         self.next_transform = None
+        self.toolhead = None
+        self._orig_move = None
+        self._orig_drip_move = None
         self.enabled = config.getboolean('enabled', True)
         self.margin = config.getfloat('margin', 0.0, minval=0.0)
         # If set, keepouts only apply when nozzle Z is at or below this height
         self.z_max = config.getfloat('z_max', None, above=0.0)
+        # Also guard toolhead.move / drip_move (bed mesh, probe, Beacon, …)
+        self.check_toolhead_moves = config.getboolean(
+            'check_toolhead_moves', True
+        )
         self.zones = self._parse_zones(config)
 
         if not self.zones:
@@ -71,8 +78,12 @@ class KeepoutZone:
                 "(zone_1_min / zone_1_max, ...)"
             )
 
-        self.printer.register_event_handler('klippy:connect', self._handle_connect)
-        self.printer.register_event_handler('klippy:ready', self._handle_ready)
+        self.printer.register_event_handler(
+            'klippy:connect', self._handle_connect
+        )
+        self.printer.register_event_handler(
+            'klippy:ready', self._handle_ready
+        )
 
         self.gcode.register_command(
             'KEEPOUT_ZONE', self.cmd_KEEPOUT_ZONE,
@@ -82,8 +93,10 @@ class KeepoutZone:
             desc=self.cmd_KEEPOUT_ZONE_STATUS_help)
 
         logging.info(
-            "keepout_zone: %d zone(s), margin=%.3f, enabled=%s, z_max=%s",
-            len(self.zones), self.margin, self.enabled, self.z_max
+            "keepout_zone: %d zone(s), margin=%.3f, enabled=%s, "
+            "z_max=%s, check_toolhead_moves=%s",
+            len(self.zones), self.margin, self.enabled, self.z_max,
+            self.check_toolhead_moves
         )
 
     def _parse_zones(self, config):
@@ -117,12 +130,27 @@ class KeepoutZone:
 
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
+        if self.check_toolhead_moves:
+            self._install_toolhead_guard()
 
     def _handle_ready(self):
         if self.next_transform is None:
             self.next_transform = self.gcode_move.set_move_transform(
                 self, force=True
             )
+
+    def _install_toolhead_guard(self):
+        # Avoid double-wrapping if the module is reloaded oddly
+        if getattr(self.toolhead, '_keepout_zone_guard', None) is self:
+            return
+        self._orig_move = self.toolhead.move
+        self._orig_drip_move = self.toolhead.drip_move
+        self.toolhead.move = self._guarded_move
+        self.toolhead.drip_move = self._guarded_drip_move
+        self.toolhead._keepout_zone_guard = self
+        logging.info(
+            "keepout_zone: guarding toolhead.move and toolhead.drip_move"
+        )
 
     def _effective_rects(self):
         rects = []
@@ -141,6 +169,14 @@ class KeepoutZone:
             return True
         return z <= self.z_max + 1e-9
 
+    def _xy_homed(self):
+        if self.toolhead is None:
+            return False
+        eventtime = self.printer.get_reactor().monotonic()
+        status = self.toolhead.get_kinematics().get_status(eventtime)
+        homed = status.get('homed_axes', '')
+        return 'x' in homed and 'y' in homed
+
     def _find_violation(self, x0, y0, x1, y1, z):
         if not self.enabled:
             return None
@@ -151,21 +187,54 @@ class KeepoutZone:
                 return name
         return None
 
+    def _raise_blocked(self, viol, x0, y0, x1, y1, z, via):
+        raise self.gcode.error(
+            "keepout_zone: move blocked via %s — path enters '%s' "
+            "(from %.3f,%.3f to %.3f,%.3f, Z=%.3f). "
+            "Use KEEPOUT_ZONE ENABLE=0 only for recovery."
+            % (via, viol, x0, y0, x1, y1, z)
+        )
+
+    def _check_toolhead_path(self, start_pos, end_pos, via):
+        if not self.enabled or not self.check_toolhead_moves:
+            return
+        # Skip until XY are homed — commanded_pos is unreliable before that
+        if not self._xy_homed():
+            return
+        viol = self._find_violation(
+            start_pos[0], start_pos[1], end_pos[0], end_pos[1], end_pos[2]
+        )
+        if viol is not None:
+            self._raise_blocked(
+                viol,
+                start_pos[0], start_pos[1],
+                end_pos[0], end_pos[1], end_pos[2],
+                via,
+            )
+
+    def _guarded_move(self, newpos, speed):
+        cur = self.toolhead.get_position()
+        self._check_toolhead_path(cur, newpos, 'toolhead.move')
+        return self._orig_move(newpos, speed)
+
+    def _guarded_drip_move(self, newpos, speed, drip_completion):
+        cur = self.toolhead.get_position()
+        self._check_toolhead_path(cur, newpos, 'toolhead.drip_move')
+        return self._orig_drip_move(newpos, speed, drip_completion)
+
     def get_position(self):
         return self.next_transform.get_position()
 
     def move(self, newpos, speed):
+        # G-code path (early reject in gcode coordinates)
         cur = self.next_transform.get_position()
-        # newpos / cur are gcode coordinates (same frame as printer.cfg XY)
         viol = self._find_violation(
             cur[0], cur[1], newpos[0], newpos[1], newpos[2]
         )
         if viol is not None:
-            raise self.gcode.error(
-                "keepout_zone: move blocked — path enters '%s' "
-                "(from %.3f,%.3f to %.3f,%.3f, Z=%.3f). "
-                "Use KEEPOUT_ZONE ENABLE=0 only for recovery."
-                % (viol, cur[0], cur[1], newpos[0], newpos[1], newpos[2])
+            self._raise_blocked(
+                viol, cur[0], cur[1], newpos[0], newpos[1], newpos[2],
+                'gcode',
             )
         self.next_transform.move(newpos, speed)
 
@@ -174,6 +243,7 @@ class KeepoutZone:
             'enabled': self.enabled,
             'margin': self.margin,
             'z_max': self.z_max,
+            'check_toolhead_moves': self.check_toolhead_moves,
             'zones': [
                 {
                     'name': z['name'],
@@ -198,8 +268,12 @@ class KeepoutZone:
     cmd_KEEPOUT_ZONE_STATUS_help = "Report configured keepout zones"
     def cmd_KEEPOUT_ZONE_STATUS(self, gcmd):
         gcmd.respond_info(
-            "keepout_zone: enabled=%s margin=%.3f z_max=%s"
-            % (self.enabled, self.margin, self.z_max)
+            "keepout_zone: enabled=%s margin=%.3f z_max=%s "
+            "check_toolhead_moves=%s"
+            % (
+                self.enabled, self.margin, self.z_max,
+                self.check_toolhead_moves,
+            )
         )
         for name, xmin, ymin, xmax, ymax in self._effective_rects():
             gcmd.respond_info(

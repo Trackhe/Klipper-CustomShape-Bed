@@ -10,6 +10,8 @@ enabled: True
 margin: 2.0
 # Optional: only enforce when Z <= this (mm). Leave unset = all heights.
 # z_max: 30
+# Also block bed_mesh / probe / Beacon paths (toolhead.manual_move → move)
+check_toolhead_moves: True
 
 # Front left motor mount (~50x50)
 zone_1_name: front_left
